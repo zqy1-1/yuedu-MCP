@@ -13,7 +13,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.mina.legadostudio"
+        applicationId = "com.mina.legadostudio.zqy"
         minSdk = 26
         targetSdk = 36
         versionCode = 161
@@ -49,11 +49,19 @@ android {
         }
     }
 
+    // CI 无 release keystore 时回退到 debug 签名，保证 release 变体能产出可安装 APK。
+    // 注意：debug 签名的包不能覆盖官方签名版，故 applicationId 追加 .zqy 以便共存。
+    val hasReleaseKeystore = !System.getenv("RELEASE_STORE_FILE").isNullOrBlank()
+
     buildTypes {
         debug { isMinifyEnabled = false }
         release {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
