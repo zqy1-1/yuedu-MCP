@@ -35,12 +35,28 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform 36 + build tools
+      # 不用 android-actions/setup-android：它在 accept-android-sdk-licenses 时
+      # 以非交互方式调用 `sdkmanager --licenses`，卡在 stdin 等待 → 步骤失败。
+      # 改为手动装 cmdline-tools + `yes |` 显式接受许可。
+      - name: Set up Android SDK (manual)
         run: |
-          sdkmanager --install "platforms;android-36" "build-tools;35.0.0" "platform-tools"
+          set -euo pipefail
+          SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          cd "$SDK_ROOT"
+          curl -sSLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdline-tools.zip -d /tmp/cmdline-tools
+          mv /tmp/cmdline-tools/cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+          rm -f cmdline-tools.zip
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+          echo "--- installed ---"
+          ls "$SDK_ROOT/platforms" "$SDK_ROOT/build-tools"
 
       - name: Cache Gradle
         uses: actions/cache@v4
