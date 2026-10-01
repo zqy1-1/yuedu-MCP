@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -110,15 +111,40 @@ fun SourcesScreen() {
                     file.writeText(payload, Charsets.UTF_8)
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
                     val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "application/json"
+                        // 用 text/plain 而非 application/json：部分接收方对冷门 MIME 支持不佳，
+                        // 文件名仍带 .json 扩展名，阅读导入只认内容不认 MIME。
+                        type = "text/plain"
                         putExtra(Intent.EXTRA_STREAM, uri)
                         putExtra(Intent.EXTRA_TITLE, project.name.ifBlank { project.id })
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        // 显式声明 ClipData：仅靠 FLAG_GRANT_READ_URI_PERMISSION 时，系统对
+                        // EXTRA_STREAM 的自动授权转换在直达分享（Direct Share）入口不可靠，
+                        // 接收方会因拿不到 URI 读权限而静默失败。
+                        clipData = ClipData.newUri(context.contentResolver, "bookSource", uri)
                     }
-                    context.startActivity(Intent.createChooser(intent, "分享书源 JSON"))
+                    // 先探测接收方，避免 startActivity 静默抛 ActivityNotFoundException
+                    val targets = context.packageManager
+                        .queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                        .mapNotNull { it.activityInfo?.packageName }
+                        .distinct()
+                    require(targets.isNotEmpty()) {
+                        "系统里没有能接收 text/plain 文件的应用（QQ 可能被后台弹出界面限制拦下）"
+                    }
+                    // 必须回主线程再启动 Activity，部分 ROM 禁止后台线程启动 UI 且不报错
+                    withContext(Dispatchers.Main) {
+                        context.startActivity(Intent.createChooser(intent, "分享书源 JSON"))
+                    }
+                    targets
                 }
-            }.onSuccess { show("已生成「${project.name.ifBlank { project.id }}」JSON，选择应用分享") }
-                .onFailure { show("分享失败：${it.message.orEmpty()}") }
+            }.onSuccess { targets ->
+                val qq = targets.firstOrNull { it.contains("tencent.mobileqq") || it.contains("tencent.tim") }
+                show(
+                    if (qq != null) "已生成「${project.name.ifBlank { project.id }}」JSON，分享面板已弹出（QQ 可选）"
+                    else "已生成 JSON，分享面板已弹出（未检测到 QQ，共 ${targets.size} 个可接收应用）"
+                )
+            }.onFailure {
+                show("分享失败：${it.message?.takeIf { m -> m.isNotBlank() } ?: it.javaClass.simpleName}")
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 package com.mina.legadostudio.ui.screens
 
+import android.content.ClipData
 import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.core.content.FileProvider
@@ -232,6 +233,8 @@ fun LogsScreen() {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                // 显式声明 ClipData：直达分享（Direct Share）入口不依赖 EXTRA_STREAM 的自动授权转换
+                clipData = ClipData.newUri(context.contentResolver, "logExport", uri)
             }
             context.startActivity(Intent.createChooser(intent, "导出日志"))
             message = "已导出 $fileName（${text.length} 字符）"
