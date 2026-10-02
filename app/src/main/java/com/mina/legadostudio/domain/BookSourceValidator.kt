@@ -65,14 +65,45 @@ class BookSourceValidator {
         obj.get(key)?.takeIf { it.isJsonObject }?.asJsonObject
 
     /**
-     * gson 报 "Unterminated object at line L column C" 时，回传错误列前后各约 140 字符的源码片段，
-     * 让 save_source 的调用方能直接看见漏引号/漏反斜杠的位置，不用整包肉眼扫。
+     * gson 报 "Unterminated object at line L column C" 时，按行号+列号定位到多行 JSON 的实际出错位置，
+     * 回传错误行前后各一行并打 `^` 标出列位，让 save_source 的调用方能直接看见漏引号/漏反斜杠的位置，
+     * 不用整包肉眼扫。旧实现只把 column 当全串偏移，多行 JSON 会指到错误的文字上。
      */
     private fun malformedSnippet(json: String, message: String): String {
+        val lineNo = Regex("line (\\d+)").find(message)?.groupValues?.getOrNull(1)?.toIntOrNull()
         val column = Regex("column (\\d+)").find(message)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return ""
-        val start = (column - 1 - 140).coerceAtLeast(0)
-        val end = (column - 1 + 140).coerceAtMost(json.length)
+        if (lineNo != null && lineNo > 0) {
+            val lines = json.split('\n')
+            if (lineNo <= lines.size) {
+                val sb = StringBuilder("\n错误位置（第 $lineNo 行第 $column 列）：")
+                val from = (lineNo - 1).coerceAtLeast(1)
+                val to = (lineNo + 1).coerceAtMost(lines.size)
+                for (i in from..to) {
+                    // 出错行很长时以列为轴心截 ±140 字符，保证列附近内容一定被带回；普通行整行展示（160 上限）
+                    val raw = lines[i - 1]
+                    val (content, base) = if (i == lineNo && raw.length > 320) {
+                        val s = (column - 1 - 140).coerceIn(0, raw.length)
+                        val e = (column - 1 + 140).coerceAtMost(raw.length)
+                        raw.substring(s, e) to s
+                    } else {
+                        val c = if (raw.length > 160) raw.take(160) + "…" else raw
+                        c to 0
+                    }
+                    sb.append('\n').append(if (i == lineNo) ">>> " else "    ")
+                        .append("第 ").append(i).append(" 行：").append(if (base > 0) "…$content…" else content)
+                    if (i == lineNo && column > 0 && column - base <= content.length + 1) {
+                        val caretPad = ">>> 第 $i 行：".length + (if (base > 0) 1 else 0) + (column - 1 - base).coerceAtLeast(0)
+                        sb.append('\n').append(" ".repeat(caretPad)).append('^')
+                    }
+                }
+                return sb.toString()
+            }
+        }
+        // 没有行号信息时退回旧行为：把 column 当全串偏移，截取前后 140 字符
+        val offset = (column - 1).coerceIn(0, json.length)
+        val start = (offset - 140).coerceAtLeast(0)
+        val end = (offset + 140).coerceAtMost(json.length)
         if (start >= end) return ""
-        return "\n错误位置附近源码（第 ${column} 列前后 140 字符）：\n…${json.substring(start, end).replace("\n", "\\n")}…"
+        return "\n错误位置附近源码（第 $column 列前后 140 字符）：\n…${json.substring(start, end).replace("\n", "\\n")}…"
     }
 }

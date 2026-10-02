@@ -1,5 +1,6 @@
 package com.mina.legadostudio.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,7 +10,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiManager.WifiLock
 import android.os.IBinder
+import android.os.PowerManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -33,12 +39,62 @@ class McpService : Service() {
     private var reaper: java.util.concurrent.ScheduledExecutorService? = null
     @Volatile private var reapBusy = false
     private var reapWorker: Thread? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiLock? = null
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var lastAddresses: Set<String> = emptySet()
+    private val networkHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
+    @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, notification("MCP 服务启动中", "正在绑定本机回环 Endpoint"))
+
+        runCatching {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "yueduMCP:service")
+            wakeLock?.acquire()
+        }.onFailure { StudioLog.add("wakelock acquire err", "W", "mcp", it.localizedMessage.orEmpty()) }
+
+        @Suppress("DEPRECATION")
+        runCatching {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "yueduMCP:service")
+            wifiLock?.acquire()
+        }.onFailure { StudioLog.add("wifilock acquire err", "W", "mcp", it.localizedMessage.orEmpty()) }
+
         McpStats.setListener(::scheduleNotificationUpdate)
         VerificationOverlayManager.refresh(this)
+        registerNetworkCallback()
+    }
+
+    private fun registerNetworkCallback() {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            private val debounceRunnable = Runnable { checkNetworkChange() }
+
+            override fun onAvailable(network: Network) {
+                networkHandler.removeCallbacks(debounceRunnable)
+                networkHandler.postDelayed(debounceRunnable, 2000)
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
+                networkHandler.removeCallbacks(debounceRunnable)
+                networkHandler.postDelayed(debounceRunnable, 2000)
+            }
+        }
+        networkCallback = callback
+        runCatching {
+            connectivityManager.registerDefaultNetworkCallback(callback)
+        }.onFailure { StudioLog.add("network callback register err", "W", "mcp", it.localizedMessage.orEmpty()) }
+    }
+
+    private fun checkNetworkChange() {
+        val current = McpAccess.localAddresses().map { it.hostAddress ?: "" }.toSet()
+        if (current != lastAddresses) {
+            StudioLog.add("mcp network change", "I", "mcp", "old=${lastAddresses.size} new=${current.size}")
+            startServer()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -52,6 +108,25 @@ class McpService : Service() {
     }
 
     override fun onDestroy() {
+        networkCallback?.let {
+            runCatching {
+                val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                connectivityManager.unregisterNetworkCallback(it)
+            }
+        }
+        networkCallback = null
+        networkHandler.removeCallbacksAndMessages(null)
+
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
+
+        wifiLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wifiLock = null
+
         McpStats.setListener(null)
         VerificationOverlayManager.hideAll()
         // 关停引擎丢到后台线程，避免主线程被阻塞
@@ -78,6 +153,7 @@ class McpService : Service() {
         val store = McpConfigStore(this)
         val config = store.load()
         val addresses = McpAccess.localAddresses()
+        lastAddresses = addresses.map { it.hostAddress ?: "" }.toSet()
         val hosts = McpAccess.allowedHosts(addresses)
         val origins = McpAccess.allowedOrigins(hosts)
         try {
@@ -95,8 +171,10 @@ class McpService : Service() {
             starting = false
             endpoints = emptyList()
             StudioLog.add("mcp start err", "E", "mcp", error.localizedMessage.orEmpty())
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                .notify(NOTIFICATION_ID, notification("MCP 启动失败", error.localizedMessage.orEmpty()))
+            runCatching {
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .notify(NOTIFICATION_ID, notification("MCP 启动失败", error.localizedMessage.orEmpty()))
+            }.onFailure { StudioLog.add("notification err", "W", "mcp", it.localizedMessage.orEmpty()) }
         }
     }
 
@@ -170,7 +248,9 @@ class McpService : Service() {
             append("\n最近访问：")
             append(if ((stats["lastAccessAt"] ?: 0) > 0) java.text.DateFormat.getTimeInstance().format(stats["lastAccessAt"]) else "暂无")
         }
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification(title, detail))
+        runCatching {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification(title, detail))
+        }.onFailure { StudioLog.add("notification err", "W", "mcp", it.localizedMessage.orEmpty()) }
     }
 
     private fun notification(title: String, text: String): Notification {

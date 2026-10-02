@@ -45,7 +45,7 @@ getDecode()@webjs:document.querySelector('.content').innerHTML
 
 `getDecode()` 在 Rhino 环境执行，`@webjs:` 之后在 WebView 环境执行。
 
-> 超时与调用路径有关：**`@webjs:` 规则段固定 10 秒**；URL 选项 `{"webView":true,"webJs":...}` 与 `contentRule.webJs` 路径走 `BackstageWebView`，默认 60 秒。MCP 调试器（WebViewPageLoader）是另一套独立实现（固定 300ms 轮询、总超时 60s、无退避），重试参数表现与手机端不同，勿互相外推。
+> 超时与调用路径有关：**`@webjs:` 规则段固定 10 秒**；URL 选项 `{"webView":true,"webJs":...}` 与 `contentRule.webJs` 路径走 `BackstageWebView`，默认 60 秒。MCP 调试器（WebViewPageLoader）是另一套独立实现（固定 300ms 轮询、总超时 60s、无退避），重试参数表现与手机端不同，勿互相外推。它不用「同步 XHR 泵」——webJs 返回 `null` 视为未就绪、到点重跑脚本，由总超时兜底，异步就绪写法与方式五「懒加载轮询」一致。
 
 ### URL 选项补充字段
 
@@ -127,6 +127,8 @@ getDecode();$('#content').html()
 
 由 `WebJsExtensions` 注入，**仅在规则段 `@webjs:` 路径可用**（URL 选项 webJs / `ruleContent.webJs` 路径 `isRule=false`，整个 Bridge 表不注入，写了会 ReferenceError）：
 
+> **以上均为官方 App 行为。Studio 沙箱（MCP 调试器 `WebViewPageLoader`）不注入任何 Bridge**——`run`/`ajaxAwait`/`webViewAwait` 等一概不存在，webJs 里调用一律 ReferenceError → `__STUDIO_ERROR__` 或 undefined 轮询到超时。
+
 | 函数 | 说明 |
 |------|------|
 | `run(jsCode)` | 回调到 Rhino 执行 JS |
@@ -150,7 +152,7 @@ Bridge API 的 Promise 通过独立回调通道 resolve，配合重试机制实�
 
 ## 同步方法（非 bridge，不返回 Promise）
 
-webJs 环境中可直接调用（来自注入的 `WebJsExtensions` 对象，代码里习惯写作 `java`；同样**仅 `@webjs:` 路径可用**）：
+webJs 环境中可直接调用（来自注入的 `WebJsExtensions` 对象，代码里习惯写作 `java`；同样**仅 `@webjs:` 路径可用**，且同 Bridge 一样**是官方 App 行为——Studio 沙箱的 WebView 不注入同步 `java` 对象**，调试期调用必报错）：
 
 | 方法 | 签名 |
 |------|------|
@@ -177,6 +179,7 @@ webJs 环境中可直接调用（来自注入的 `WebJsExtensions` 对象，代�
 
 - 超时：`@webjs:` 规则段 **10 秒**；URL 选项与 `ruleContent.webJs` 路径默认 **60 秒**（MCP 调试器为独立实现，参数不同）
 - 返回空或 `null` 时重试最多 30 次（间隔：200ms → 400ms → 600ms → 800ms → 1000ms，之后恒定 1000ms）。重试时 JS 重新执行，不适用于有副作用的操作
+- `java.webView(html, url, js)` 三参形式：`html` 非空时以 `url` 为 baseURL 经 `loadDataWithBaseURL` 直接渲染交接文档；`html` 为 null/空白仍走 `loadUrl` 抓线上页面。`url` 必须是公网 http/https（file/javascript/data/content 等 scheme 与回环/私网地址一律拒绝，重定向后的 finalUrl 同口径复验），`html` 超过 4,000,000 字符被拒
 - WebView 图片加载默认关闭（`blockNetworkImage = true`），不要依赖图片触发 lazy-load
 - 网站可能检查 `event.isTrusted`，程序化触发的点击/滚动会被忽略
 - `console.log` 仅在 `@webjs:` 规则段输出到调试面板；URL 选项与 `ruleContent.webJs` 路径无此输出（官方 App 行为）

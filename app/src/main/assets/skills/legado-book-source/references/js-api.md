@@ -45,30 +45,49 @@
 ### Studio 沙箱可用 API 清单（与原版阅读的差异）
 
 > 本节针对 Studio 沙箱（MCP 工具 `eval_js` / `debug_source` / `save_source`）内的 JS 环境。沙箱的 `java` 对象由 `StudioJsApi` 提供，与原版阅读并不完全一致：**清单之外的方法缺一个都报错**，写书源前先对照本节，不要按上文原版阅读的清单想当然。
+>
+> **每次 `eval_js` 都是全新作用域**：上一次调用里 `var` 声明的变量、对原型的改动都不会带到下一次；要跨调用存取走 `cache.put`/`cache.get`。报错信息若命中「方法/属性不存在」会自带【API 提示】指回本清单，按提示核对方法名与参数个数即可。
+>
+> **jsLib（书源级 JS 库）**：`debug_source` / `check_source` 会把 BookSource JSON 的 `jsLib` 字段装载进 Rhino 作用域，之后 searchUrl `{{}}`/`@js:`、bookList、目录、正文等所有规则 JS 都能直接调用其中声明的函数与顶层 `var`。隔离语义：jsLib 在独立的父层作用域求值——规则表达式里同名 `var`/赋值只遮蔽当次求值，下一次求值 jsLib 函数仍然干净；jsLib 顶层 `var` 每次求值重新初始化，不跨调用累积。jsLib 里 `const {java, source} = this` 的惯用法可用（`this` 在调用点解析到当次作用域，`java`/`source`/`cache`/`cookie` 绑定照常生效）。**沙箱不加载外部 jsLib**：`jsLib` 值是 `http(s)://...` 时不会发起网络请求，只在 debug 报告的 `lines` 里留一条诊断；外链库请把需要的函数内联进 `jsLib`。`eval_js` 不传 source，不会装载任何 jsLib。
 
-沙箱内 `java` 对象实际提供的方法（以 StudioJsApi 为准）：
+沙箱内 `java` 对象实际提供的方法（以 `RhinoEvaluator.kt` 的 `StudioJsApi` 为准）：
 
 **网络：**
 ```js
 java.ajax(url)
-java.connect(url, header?, timeout?)
+java.connect(url)
+java.connect(url, header)
+java.connect(url, header, methodOrTimeout)   // 第3参 "GET"/"POST"/"HEAD" 视为请求方法，否则当 timeout
+java.connect(url, header, method, body)
+java.connect(url, header, method, body, charset)
 java.get(url, headers?)
 java.post(url, body, headers?)
+java.fetchFont(url)             // Studio 沙箱专有：仅放行字体响应（font/* Content-Type 或 .woff/.woff2/.ttf/.otf
+                                // URL，且前 4 字节魔数为 wOF2/wOFF/TTF/OTTO），返回原始 ByteArray，其余一律报错
+java.decodeWoff2(data)          // Studio 沙箱专有：解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap；
+                                // 入参 ByteArray 或 base64 字符串；返回 {"U+4E2D":1,...} 码点→glyphId。
+                                // 注意：glyphId 是字形序号，不等于汉字；gid→汉字要字形轮廓比对
 java.ajaxAll(urls)
-java.webView(url)             // 单参形式
-java.webView(html, url, js)   // 三参形式
+java.webView(url)             // 单参形式：loadUrl 抓渲染后页面
+java.webView(html, url, js)   // 三参形式：html 非空时以 url 为 baseURL 直接渲染交接文档（loadDataWithBaseURL），
+                              // html 为 null/空白仍 loadUrl；url 必须是公网 http/https（拒绝 file/javascript/回环私网），
+                              // js 返回 null 会按固定间隔轮询重试直到超时
+java.startBrowserAwait(url, title?, refetch?) // 沙箱内不弹浏览器：直接抛验证异常（等效「需要验证」信号）
 ```
 
-**响应对象方法：**
+**响应对象方法（`java.connect`/`java.get`/`java.post`/`java.ajaxAll` 元素均返回此对象）：**
 ```js
-code()          // 注意是 code()，不是 statusCode()
-statusCode()    // code() 的别名，刚加；推荐用官方 code()
-url()
+code()          // 注意是 code()，不是 status()
+statusCode()    // code() 的别名；推荐用官方 code()
+url()           // 重定向后的最终 URL（finalUrl），非请求 URL
 body()
-headers()       // 响应头（字符串/Map 视实现），取单个头用 ''+headers() 后正则
+headers()       // 响应头 Map（JS 里是 object），取单个头用下面的 header(name) 更稳
+header(name)    // 单头查询，大小写不敏感，如 res.header('set-cookie')
+bytes()         // 原始字节 ByteArray，GBK 等编码失真时用它重构
 callTime()
 raw()
 request()
+priorResponse() // 重定向链前置响应
 ```
 
 **编码：**
@@ -130,7 +149,7 @@ source.get(key)
 - `java.lang.*` 除 `Thread.sleep` 外全部不可用（`java.util.List`、`java.lang.System` 等都拿不到）；需显式构造 String 对象用 `new Packages.java.lang.String(...)`，没有 `new java.lang.String(...)`
 - `java.currentTimeMillis` / `java.decodeURI` / `java.utf8ToGbk` / `java.getElement` / `java.getElements`：任何环境都没有，别按「原版清单」想当然
 - `java.bytesToStr` 是 Studio 沙箱专有，官方 App 未验证；跨环境书源字节转字符串一律用标准两件套 `java.base64DecodeToByteArray(s)` + `new Packages.java.lang.String(bytes, "UTF-8")`
-- （仅 Studio 沙箱）`org.jsoup.Jsoup.parse` 等 Java 静态类直调不可用，会报 "parse 不是函数，它是 object"；官方 App 中该调用可用，但两环境下都建议优先 `java.getString`/`@css:` 规则
+- （仅 Studio 沙箱）`org.jsoup.Jsoup.parse` 等 Java 包路径直调不可用（报「parse 不是函数，它是 object」一类错误）；**沙箱注入了全局 `Jsoup` 代理对象**，用 `Jsoup.parse(html)` / `Jsoup.parseBodyFragment(html)` / `Jsoup.connect(url)` 代替；官方 App 中 `org.jsoup.Jsoup` 直调可用，但两环境下都建议优先 `java.getString`/`@css:` 规则
 - Rhino 里 java 方法返回的 `java.lang.String` 直接 `.replace(/正则/, ...)` 会报「选择不明确」，必须先 `String()` 包一层；域名等纯文本替换直接 `.replace("a","b")`
 - `'+'` 拼接产生的是 ConsString，直接传给 java 方法当 `java.lang.String` 参数可能 `ClassCastException`，包 `String()` 兜底
 
@@ -290,7 +309,7 @@ java.post(url: String, body: String, headerMap: Map<String, String>, timeout: In
 java.get(url: String, headerMap: Map<String, String>, timeout: Int? = null): Connection.Response
 java.head(url: String, headerMap: Map<String, String>, timeout: Int? = null): Connection.Response
 
-// 使用 webView 访问网络
+// 使用 webView 访问网络（html 非空时以 url 为 baseURL 内嵌渲染交接文档，等价官方 loadDataWithBaseURL 路径）
 java.webView(html: String?, url: String?, js: String?, cacheFirst: Boolean = false): String?
 
 // 使用 webView 获取跳转 url

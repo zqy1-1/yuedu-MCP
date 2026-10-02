@@ -4,7 +4,7 @@
     {
       "id": "Legado书源编码处理指南.md",
       "path": "knowledge/Legado书源编码处理指南.md",
-      "bytes": 7495
+      "bytes": 7866
     },
     {
       "id": "css选择器规则.txt",
@@ -49,7 +49,7 @@
     {
       "id": "js-beginner-tutorial.md",
       "path": "knowledge/js-beginner-tutorial.md",
-      "bytes": 5984
+      "bytes": 8866
     },
     {
       "id": "legado-rules-map.md",
@@ -59,7 +59,7 @@
     {
       "id": "第三方搜索逆向实战-rrssk.md",
       "path": "knowledge/第三方搜索逆向实战-rrssk.md",
-      "bytes": 7224
+      "bytes": 9524
     },
     {
       "id": "英文站适配反推-主流站.md",
@@ -74,7 +74,17 @@
     {
       "id": "英文站收录与盲区-20260921.md",
       "path": "knowledge/英文站收录与盲区-20260921.md",
-      "bytes": 3247
+      "bytes": 3259
+    },
+    {
+      "id": "JS挑战与动态搜索避坑实战-阿里书屋.md",
+      "path": "knowledge/JS挑战与动态搜索避坑实战-阿里书屋.md",
+      "bytes": 7140
+    },
+    {
+      "id": "TXT整本站伪目录实战-爱书网.md",
+      "path": "knowledge/TXT整本站伪目录实战-爱书网.md",
+      "bytes": 6928
     }
   ]
 }

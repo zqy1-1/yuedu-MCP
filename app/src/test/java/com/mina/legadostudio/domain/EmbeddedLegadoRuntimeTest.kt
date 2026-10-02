@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -204,6 +205,86 @@ class EmbeddedLegadoRuntimeTest {
             val report = runtime.debug(source, "--${server.url("c1")}")
             val content = (report.data as Map<*, *>)["content"].toString()
             assertEquals("第一段\n第二段\n第三段", content)
+        }
+    }
+
+    @Test fun debugReportsJsChallengeInsteadOfSilentEmptyList() = runBlocking {
+        // 阶段二回归：200 JS 挑战页不能被当成「CSS 选不中」静默吞掉——必须抛出带人机挑战提示的错误
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody(
+                """<div id="x">内容正在载入……</div><script>var c2="abc";</script><script src="/nnxswnn/a.js"></script>"""
+            ))
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(), "searchUrl" to "search?q={{key}}",
+                "ruleSearch" to mapOf("bookList" to ".book", "name" to "a@text"),
+                "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#content@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(HttpFetcher(), BookSourceValidator(), LegadoRuleEngine(), RhinoEvaluator(HttpFetcher(), Gson()))
+            val error = runCatching { runtime.debug(source, "关键字") }.exceptionOrNull()
+            assertTrue(error is com.mina.legadostudio.network.JsChallengeException)
+            assertTrue(error!!.message.orEmpty().contains("挑战") || error.message.orEmpty().contains("JS_CHALLENGE"))
+        }
+    }
+
+    @Test fun enabledCookieJarFalseDisablesJarForMainAndJsSubRequests() = runBlocking {
+        // 书源级 enabledCookieJar:false → search 主请求不回带 jar、不吸收 Set-Cookie，
+        // searchUrl @js 内 java.connect 的二次请求同口径隔离（bindings 透传给 RhinoEvaluator）
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = when (request.path) {
+                    "/step1" -> MockResponse().setBody("seed").setHeader("Set-Cookie", "guard=g1; Path=/")
+                    "/step2" -> MockResponse().setBody("next")
+                    "/search" -> MockResponse().setBody("<div class='book'><a href='/b/1'>书名</a></div>")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "enabledCookieJar" to false,
+                // @js 返回字面量 URL 字符串：先连发两次 java.connect 探针，再返回搜索地址
+                "searchUrl" to "@js:java.connect('" + server.url("/step1") + "');java.connect('" + server.url("/step2") + "');'" + server.url("/search") + "'",
+                "ruleSearch" to mapOf("bookList" to ".book", "name" to "a@text", "bookUrl" to "a@href"),
+                "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#c@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(
+                HttpFetcher(cookieJar = com.mina.legadostudio.network.StudioCookieJar()),
+                BookSourceValidator(), LegadoRuleEngine(),
+                RhinoEvaluator(HttpFetcher(cookieJar = com.mina.legadostudio.network.StudioCookieJar()), Gson()),
+            )
+            runtime.debug(source, "关键字")
+            server.takeRequest()                       // /step1：无 Cookie 可带
+            assertNull(server.takeRequest().getHeader("Cookie"))   // /step2：jar 禁用 → 不带 guard
+            assertNull(server.takeRequest().getHeader("Cookie"))   // /search 主请求同口径
+        }
+    }
+
+    @Test fun enabledCookieJarAbsentOrTrueKeepsJarOn() = runBlocking {
+        // 缺省（字段不存在）→ jar 照旧：/step1 种下的 Set-Cookie 应回带到 /step2
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = when (request.path) {
+                    "/step1" -> MockResponse().setBody("seed").setHeader("Set-Cookie", "guard=g1; Path=/")
+                    "/search" -> MockResponse().setBody("<div class='book'><a href='/b/1'>书名</a></div>")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val jar = com.mina.legadostudio.network.StudioCookieJar()
+            val source = Gson().toJson(mapOf(
+                "bookSourceName" to "测试", "bookSourceUrl" to server.url("/").toString(),
+                "searchUrl" to "@js:java.connect('" + server.url("/step1") + "');'" + server.url("/search") + "'",
+                "ruleSearch" to mapOf("bookList" to ".book", "name" to "a@text", "bookUrl" to "a@href"),
+                "ruleToc" to mapOf("chapterList" to "a"), "ruleContent" to mapOf("content" to "#c@html"),
+            ))
+            val runtime = EmbeddedLegadoRuntime(
+                HttpFetcher(cookieJar = jar), BookSourceValidator(), LegadoRuleEngine(),
+                RhinoEvaluator(HttpFetcher(cookieJar = jar), Gson()),
+            )
+            runtime.debug(source, "关键字")
+            server.takeRequest()                                       // /step1：种下 guard
+            assertEquals("guard=g1", server.takeRequest().getHeader("Cookie"))  // /search 回带
         }
     }
 }

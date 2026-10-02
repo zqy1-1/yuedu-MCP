@@ -55,9 +55,25 @@ description: 创建、修改、保存、调试或校验阅读（Legado）书源�
 | 大结果分段读取 | `read_result` |
 | 站点验证与每域模式 | `browser_verify`、`get_verification_status`、`set_domain_mode`、`get_domain_modes` |
 | Cookie | `get_cookies`、`set_cookie`、`clear_cookies` |
+| WebView Cookie 回填书源 | `apply_webview_cookies`（CF/JS 挑战人工过完后，把采到的 Cookie+UA 按名合并进书源 `header`） |
 | HTTP 事务记录 | `set_http_log_recording`、`get_http_logs`、`get_http_log` |
+| 抓包会话（逐次 `capture_once` / 可见浏览器 / 无头 `webview_capture` 三类，统一按 cap:contextId 管理） | `capture_once`、`webview_capture`、`list_captures`、`get_capture`、`poll_capture`、`get_capture_resource` |
 | 知识库 / 技能参考 | `search_knowledge`、`read_knowledge`、`get_skill_reference` |
 | 操作 / 崩溃 / 诊断日志 | `get_logs`、`get_log`、`get_crash_logs`、`get_crash_log`、`get_diagnostic_snapshots`、`get_diagnostic_snapshot` |
+
+### 抓包取证：能力选择
+
+需要网络级证据时按场景挑一种，不要混用：
+
+| 场景 | 做法 | 证据口径 |
+|---|---|---|
+| 一次性自动探测：页面、接口、图片/字体等静态资源 | `webview_capture(url)` 一次性无头抓包 | GET/HEAD 由独立 OkHttp 供给并如实记录（**非 WebView 原生网络栈字节流**，平台自行补发的请求不在记录内）；3xx/204/304 与无请求体的 POST 只记 OBSERVED_ONLY；私网/非法目标记 BLOCKED；跑完即销毁、**不可交互** |
+| 单次 HTTP 请求的逐跳重定向证据 | `capture_once(url, method, headers, body)` | 每个带 Location 的 3xx 中间跳单独落一条 `originKind=capture_hop`（被 SSRF 拦截的跳也先落库），最终响应一条 `capture_once` |
+| 需要点击/翻页/登录等人工交互 | 提示用户在 App「日志→抓包→浏览器抓包」的可见浏览器里操作 | 同上 OkHttp 供给/观察口径；用户在页内的交互动作由人完成，MCP 当前**不能**遥控该浏览器（无导航/点击/执行脚本工具） |
+
+读取统一走 `cap:` 会话：`list_captures` 找 contextId（`kind` 如实区分逐次/可见浏览器/无头 webview/未知）→ `get_capture(contextId, offset, limit)` 全量分页，活会话用 `poll_capture(contextId, afterLogId=latestLogId)` 增量拉新行（空页不推进游标，间隔≥1秒）→ 单条详情 `get_http_log(id)` → 字体/图片等二进制用 `get_capture_resource(logId)` 分片取（仅限该会话目录内落盘资源，7 天过期后明确报错）。Cookie/Authorization/Set-Cookie 在 `get_http_log` 输出里脱敏为 `***`，但 URL/query 不脱敏——可能带令牌，转贴前自查。字体工具 `fetch_font`/`get_font_map` 返回的 cmap 是码点→glyphId，glyphId 不等于汉字（还原须字形比对），不要宣称通解。
+
+文档/测试示例一律用虚构域名；任何已取证的单站做法只对该站有效，不上升为模板。
 
 MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`save_source` 覆盖当前记录；只有下一轮专门修复时才传 `newVersion=true` 追加。调试阶段把 JSON 直接传给 `debug_source`，不要每改一次规则就 save。App 底栏为 MCP / 书源 / 技能 / 验证中心 / 日志；排查故障用 MCP 读日志，**不要**引导用户打开已删除的「项目列表」。
 
@@ -72,6 +88,8 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 3. 都未命中 → 再走 `fetch_page` 探索。**不要一上来就抓网页。**
 
 > **rrssk 搜索外包型站点铁律**：主站搜索框跳外站（rrssk 联盟）时，写任何搜索规则前先读 `knowledge/第三方搜索逆向实战-rrssk.md` 第 0 节——一律以书友社成品为模板骨架起步，只重取证第 8 节清单的站点差异，禁止从零试错。
+
+> **单站取证案例边界**：知识库里的 `JS挑战与动态搜索避坑实战-阿里书屋.md`（m.ali75.com）与 `TXT整本站伪目录实战-爱书网.md`（dm.aqxsw66.com）是**特定站点的取证记录，不是全网站通用模板**。只有当目标站明确是对应域名时才按 `read_knowledge` 读取参考；其他站点即使出现相似现象（JS 挑战页、整本 TXT），也只把其中已证实的站点结构当证据，解法必须按目标站重新取证，禁止把案例骨架直接套到别的域名。rrssk 书友社文档是例外（其换站复用清单本就面向同联盟站点）。
 
 ### 0.1 查重
 
@@ -91,6 +109,12 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 | bookUrl | 详情页绝对 URL |
 
 没有真实样本与预期值时，先继续探针，不写选择器。
+
+## 复杂书源 JS 选型提醒
+
+遇到 JS 人机挑战、动态签名、依赖 Cookie/跨请求会话、加密接口、动态 POST 参数或 AJAX 分页等难点时，**优先评估用 JS 组织请求与处理数据**；不要为了避免 JS 而反复试错、硬套静态选择器。静态页面已有可靠 DOM 时，字段提取仍优先 CSS/XPath，按实际链路选择 `searchUrl @js`、`loginCheckJs`、URL 的 `bodyJs` 或相应规则中的 JS，逐阶段实测。`searchUrl @js` 必须返回可请求的 URL（或 URL 加请求选项），不能把 HTML 正文直接当 URL 返回。
+
+已有成品书源先只读核对实际规则，再决定是否有必要最小修改；探索日志中的探针不等于成品调用链。推荐 JS 不代表强制改写已经可用的书源。
 
 ## Phase 1–5：逐阶段闭环
 
@@ -131,7 +155,7 @@ MCP 是默认入口。**同一 `bookSourceUrl` 默认只保留一条成品**：`
 |---|---|
 | MCP 未连接、连接拒绝、工具不可用 | 停止书源写入，报告连接故障；不要把环境故障误判为规则故障 |
 | 返回 verification_required / webview_mode_enabled | 按「验证处理」速查表走，不要当规则故障改规则 |
-| 请求失败、403、重定向异常 | 开启 HTTP 记录，读请求详情；检查请求头、Cookie、最终 URL，按 troubleshoot 处理 |
+| 请求失败、403、重定向异常 | 开启 HTTP 记录，读请求详情；检查请求头、Cookie、最终 URL，按 troubleshoot 处理；要逐跳重定向证据用 `capture_once` 抓一次再 `get_capture` 回看中间跳 |
 | 页面有内容但选择器为空 | 用 `analyze_html` / `eval_js` 在快照上输出 DOM 片段、选择器数量和节点文本，再修改选择器 |
 | 字段错位或 URL 错 | 固定同一真实样本，分别打印字段原值与解析值 |
 | JavaScript 报错 | 用最小 `eval_js` 探针复现；注意 Rhino 兼容性与 Java 对象字符串化 |

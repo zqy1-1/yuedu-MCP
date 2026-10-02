@@ -11,7 +11,8 @@
 3. `fetch_page` 抓页存快照，用 `analyze_html` / `eval_js` 在快照上做探针。
 4. 用 `debug_source` 验证当前阶段（JSON 直接传入，不 save）。
 5. 完成后 `save_source` 保存 → `get_source` 回读 → `check_source(refresh=true)` 实时验收。
-6. 不要引导用户打开已删除的「项目列表」。本地书源在底栏「书源」页，可导入至阅读或删除。排查请用 `get_logs` / `get_http_logs` / `get_crash_logs`；日志页支持一键导出当天 HTTP/操作日志，需要原始报文时让用户点「导出」直接贴出。
+6. 需要网络级证据时按 SKILL.md「抓包取证」选工具：自动探测 `webview_capture`，单次请求逐跳证据 `capture_once`，要人点页/翻页则提示用户开 App 可见浏览器抓包；读取统一 `list_captures` → `get_capture` / 活会话 `poll_capture` → `get_http_log` → 二进制 `get_capture_resource`。`webview_capture` 是 OkHttp 供给/观察证据（非 WebView 原生网络栈抓包），跑完即销毁、不可交互；URL/query 可能含令牌，转贴前检查。
+7. 不要引导用户打开已删除的「项目列表」。本地书源在底栏「书源」页，可导入至阅读或删除。排查请用 `get_logs` / `get_http_logs` / `get_crash_logs`；日志页支持一键导出当天 HTTP/操作日志，需要原始报文时让用户点「导出」直接贴出。
 
 MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替应用内调试。旧 `scripts/legado-debug.py` 仅是用户明确同意后的备用入口。
 
@@ -21,7 +22,10 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 |---|---|
 | 写规则之前 | `references/corpus.md`（语料命中） |
 | 第三方搜索（rrssk）/ 主站搜索框跳外站 | 知识库 `第三方搜索逆向实战-rrssk.md` 第 0 节模板铁律 + 第 8 节换站复用清单（一律以书友社成品为骨架起步，禁止从零试错） |
+| 目标站即阿里书屋 m.ali75.com 时的挑战页取证 | 知识库 `JS挑战与动态搜索避坑实战-阿里书屋.md`（仅同站取证参考，非通用模板；通用排查走下表「按失败现象」） |
+| 目标站即爱书网 dm.aqxsw66.com 时的整本 TXT 伪目录取证 | 知识库 `TXT整本站伪目录实战-爱书网.md`（仅同站取证参考，非通用模板；通用整本站先查语料 `references/corpus.md` + `references/content-rules.md`） |
 | 初始化、基础字段、详情、搜索、目录、正文 | `references/basics.md` |
+| 生成 JSON 的字段清单与硬性合同（必填字段、分页/JS 位置约束） | `references/generation-contract.md`，字段逐项说明见 `references/template.yaml`（字段清单，非必套站点结构） |
 | 正文多页合并 / 翻页 / 净化验收 | `references/content-rules.md` |
 | 单站深案：番茄小说（官方接口/AES/字体混淆/插图） | `references/fanqie.md` |
 | 英文/国际站书源（查重 → royalroad 底本 → 适配仓反推 → 活页验收） | `references/english-sites.md` |
@@ -44,7 +48,10 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 | 正文插图丢失、正文出现 CSS 文本、字体乱码（番茄等站点） | `references/content-rules.md`, `references/fanqie.md` |
 | 搜索无结果、乱码、分页或 URL 参数异常 | `references/basics.md`, `references/troubleshoot.md` |
 | 搜索走外站（rrssk）、signJs 签名、`__snc` 403、q 绑定会话 | 知识库 `第三方搜索逆向实战-rrssk.md`（模板铁律 + 关键坑 + 换站清单） |
+| HTTP 200 但响应是 JS 挑战页/拦截页（搜索选择器全空、不是规则故障） | `references/troubleshoot.md` 第 1-4、9-10 节，`references/webjs.md`；仅当目标站是阿里书屋 m.ali75.com 时再读知识库 `JS挑战与动态搜索避坑实战-阿里书屋.md`（同站取证，勿当通用模板） |
+| 整本 TXT/下载站（一本书=一个文件，无章节概念） | `references/corpus.md`（先查语料模板族）、`references/content-rules.md`；仅当目标站是爱书网 dm.aqxsw66.com 时再读知识库 `TXT整本站伪目录实战-爱书网.md`（同站取证，伪目录骨架勿照抄到其他站） |
 | 浏览器有内容但普通请求拿不到 | `references/troubleshoot.md`, `references/webjs.md` |
+| 需要逐跳重定向证据 / 静态资源与页面事务取证 / 活会话持续追加 | SKILL.md「抓包取证」选择表：`capture_once` / `webview_capture` / 可见浏览器 → `list_captures` → `get_capture` / `poll_capture` → `get_http_log` / `get_capture_resource` |
 | 403、验证盾、跳转、UA、Cookie | `references/verification.md`, `references/troubleshoot.md` |
 | JS 报错、Rhino 兼容、java.* 用法 | `references/basics.md`, `references/js-api.md`, `references/js-tutorial.md` |
 | 目录倒序、章节乱序、过滤广告章节 | `references/js-tutorial.md` |
@@ -79,7 +86,7 @@ MCP 连接故障属于环境故障。先恢复连接，不以本地猜测代替�
 - 第一个节点的文本、属性和链接
 - JavaScript 的输入值、输出值和异常
 
-需要网络级证据时：开启 HTTP 日志 → 复现一次 → 读取该次请求详情。不要批量复现制造噪音。
+需要网络级证据时：开启 HTTP 日志 → 复现一次 → 读取该次请求详情；要逐跳重定向或整会话取证时用 SKILL.md「抓包取证」里的抓包工具。不要批量复现制造噪音。
 
 ## 每阶段记录
 

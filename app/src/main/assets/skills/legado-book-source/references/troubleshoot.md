@@ -140,6 +140,8 @@ window.run("java.toast('执行成功');'成功'")
 ## 4. loginCheckJs 过验证盾（写进成品书源）
 
 > 本节是**成品源**在官方阅读 App 内过盾的方案。MCP 调试期遇到盾请走 [`verification.md`](verification.md)（验证中心 + 每域模式），两者互补不冲突：调试期过完盾验证规则后，若目标站真实使用中会频繁出盾，仍应把本节的 `loginCheckJs` 写进书源。
+>
+> **覆盖边界**：`loginCheckJs` 由官方阅读 App 在请求后执行；**Studio 沙箱的 `debug_source`/`check_source`/`eval_js` 不执行它**（运行时没有该钩子），调试期验证 `loginCheckJs` 逻辑只能把其中的检测/改写片段拷进 `eval_js` 手动跑，沙箱里 `java.startBrowserAwait` 会直接抛验证异常（等效于「需要验证」信号），不会像真机一样弹浏览器。
 
 `loginCheckJs` 位于书源**基础**选项卡。Legado 在每次请求网站后都会执行此 JS 代码，`result` 为响应对象（包含 `url`、`code`、`body` 等属性）。JS 需返回修改后的响应对象。
 
@@ -173,7 +175,7 @@ result;
 
 1. 检测响应体中的验证特征（如 `_cf_`、`ge_ua`、`verify.php`）+ 状态码 ≥ 403
 2. 清除旧 cookie：`cookie.removeCookie(baseUrl)`
-3. 调用 `java.startBrowserAwait(url, title, isPost)` 启动浏览器等待用户操作
+3. 调用 `java.startBrowserAwait(url, title, refetchAfterSuccess)` 启动浏览器等待用户操作（第三参数是「验证成功后是否重新抓取」，**不是 isPost**；示例传 `false`）
 4. 验证通过后从新响应中提取正确的 URL
 5. **末尾必须返回 `result`**（修改后的响应对象）
 
@@ -214,12 +216,17 @@ result;
 })()
 ```
 
-Java 网络请求方法（详见 `references/js-api.md`）：
-- `java.get(urlStr: String, headers: Map<String, String>)`
-- `java.post(urlStr: String, body: String, headers: Map<String, String>)`
-- `java.connect(urlStr, header = null, callTimeout: Int? = null): StrResponse`
+Java 网络请求方法（**Studio 沙箱实测签名**，详见 `references/js-api.md`；沙箱 `java.get`/`java.post` 返回与 `java.connect` 相同的响应对象，不是官方 App 的 `Connection.Response`）：
+- `java.get(url)` / `java.get(url, headers)` — headers 为 Map 或 JSON 字符串
+- `java.post(url, body)` / `java.post(url, body, headers)`
+- `java.connect(url)` / `java.connect(url, header)` / `java.connect(url, header, method或timeout)` / `java.connect(url, header, method, body)` / `java.connect(url, header, method, body, charset)`
+- 响应对象：`code()` `body()` `headers()`（Map，取单头先 `''+headers()` 或直接 `header(name)`）`header(name)` `bytes()` `raw()` `request()` `callTime()` `priorResponse()`
 
 ## 6. 字体解析（正文乱码）
+
+> ⚠️ **仅官方 App 可用**：`java.queryTTF` / `java.replaceFont` 在 **Studio 沙箱未实现**（`StudioJsApi` 无此方法），调试期调用必报「方法不存在」。字体替换逻辑无法在沙箱内验证——规则可先写好，但效果只能到官方 App 实测；`eval_js`/`debug_source` 里调试其余规则时请先把字体段注释掉或短路。
+>
+> 沙箱内替代能力（Studio 专有，官方 App 没有，跨环境书源不要写进成品规则）：`java.fetchFont(url)` 只放行字体响应并返回原始 `ByteArray`；`java.decodeWoff2(bytes|base64)` 解 WOFF2（内部 Brotli）/WOFF/TTF/OTTO 的 cmap，返回 `{"U+4E2D": gid}`。注意：`decodeWoff2` 给的是码点→**glyphId**，glyphId 不等于汉字；gid→真实汉字必须做字形轮廓比对（见 `java.queryTTF` 语义），沙箱未提供比对原语，只能当探测/取证工具用。MCP 侧对应工具是 `fetch_font`/`get_font_map`（见工具描述）。
 
 正文替换规则中使用，根据 f1 字体的字形数据到 f2 中查找字形对应的编码。
 
@@ -280,6 +287,7 @@ decodeImage(result, key)
 ## 10. searchUrl 的 @js: 不能带 return，注意 key 的作用域
 
 - `@js:` 最后一行必须是**纯表达式返回**，不能带 `return`（末尾表达式的值即返回值，带 `return` 会报错）
+- 返回值只能是 http(s) URL 或 `"url," + JSON.stringify({method,body,headers})`——**返回 HTML 正文会被当 URL 用而失败**；要自发请求并解析列表，用 `ruleSearch.bookList` 的 `@js:`（`result`/`src` 是响应体，可 `java.ajax`/`java.connect` 再请求，返回元素数组）
 - `key` 变量只在 `searchUrl` 作用域注入；`ruleSearch.bookList` 的 JS 里没有 `key`，需要时先通过 `source.put` 或 URL 参数带过去
 
 ## 11. rrssk 签名脚本按天滚动，不能吃跨天缓存

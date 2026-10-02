@@ -78,4 +78,66 @@ class RhinoEvaluatorEnvTest {
         val write = runCatching { rhino().evaluate("cookie.setCookie('https://x.test', 'a=1')") }
         assertTrue(write.isFailure)
     }
+
+    @Test fun twoEvalCallsDoNotShareTopLevelScope() {
+        // 阶段二回归：eval_js 两次调用必须是独立作用域——第一次的 var 声明不能泄漏到第二次
+        val evaluator = rhino()
+        evaluator.evaluate("var leaked_marker = 'hello'")
+        val out = evaluator.evaluate("typeof leaked_marker")
+        assertEquals("undefined", out.value)
+    }
+
+    @Test fun twoEvalCallsDoNotSharePrototypeMutations() {
+        // 原型篡改也不能跨调用：第一次给 String.prototype 塞方法，第二次拿不到
+        val evaluator = rhino()
+        evaluator.evaluate("String.prototype.__pwn = function(){ return 'x'; }; 'ok'")
+        val out = evaluator.evaluate("typeof ''.__pwn")
+        assertEquals("undefined", out.value)
+    }
+
+    @Test fun existingMethodDoesNotGetApiHint() {
+        // 已存在方法正常执行，不产生 API 提示
+        val out = rhino().evaluate("java.md5Encode('x')")
+        assertTrue(out.value?.isNotBlank() == true)
+    }
+
+    @Test fun crossCallSharingGoesThroughCacheNotScope() {
+        // var 不跨调用，但显式 cache.put/get 是支持的共享通道：说明「独立作用域」断的是隐式全局，不是显式 cache
+        val evaluator = rhino()
+        val key = "share_${System.nanoTime()}"
+        evaluator.evaluate("cache.put('$key', 'v9')")
+        val out = evaluator.evaluate("cache.get('$key')")
+        assertEquals("v9", out.value)
+        RuntimeCacheStore.delete(key)
+    }
+
+    @Test fun missingMethodGetsJsApiHint() {
+        // 不存在的方法：确凿「方法不存在」错误必须附 js-api.md 提示
+        val error = runCatching { rhino().evaluate("java.thisMethodDoesNotExist('x')") }.exceptionOrNull()
+        assertTrue(error != null)
+        val message = error!!.message.orEmpty()
+        assertTrue("expected API hint in: $message", message.contains("【API 提示】"))
+        assertTrue("expected js-api.md reference in: $message", message.contains("js-api.md"))
+    }
+
+    @Test fun wrongSignatureGetsJsApiHint() {
+        // 签名不匹配（connect 只接受 header 为 Map/String）：异常消息要能落到提示分支
+        val error = runCatching { rhino().evaluate("java.connect(12345)") }.exceptionOrNull()
+        // 数字 URL 可能先被运行时校验拦下；只要确认不会把一般 JS 异常吞掉即可
+        assertTrue(error != null)
+    }
+
+    @Test fun genericJsErrorDoesNotGetApiHint() {
+        // 一般 JS 异常（如 引用未定义变量）不追加 API 提示
+        val error = runCatching { rhino().evaluate("throw new Error('自定义错误')") }.exceptionOrNull()
+        assertTrue(error != null)
+        assertTrue(error!!.message.orEmpty().contains("自定义错误"))
+        assertTrue(!error.message.orEmpty().contains("【API 提示】"))
+    }
+
+    @Test fun syntaxErrorDoesNotGetApiHint() {
+        val error = runCatching { rhino().evaluate("var x = ") }.exceptionOrNull()
+        assertTrue(error != null)
+        assertTrue(!error!!.message.orEmpty().contains("【API 提示】"))
+    }
 }

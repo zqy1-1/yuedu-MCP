@@ -178,6 +178,73 @@ class TaskContextStoreTest {
             dir.deleteRecursively()
         }
     }
+    @Test fun binaryEntriesAreExcludedFromSnapshotAndRestore() = runBlocking {
+        // 回归：scheduleSnapshot 曾不带 kind 筛选——saveBinary 自己不写快照，但后续
+        // create/saveResult/describe 触发的快照会把 binary 条目的 kind/id/label 写盘；
+        // 重启后恢复出没有 bytes 的 ghost 引用（binary() 报 BINARY_DATA_MISSING），
+        // 违反「二进制槽不入快照/进程重启即失效」约定。
+        val dir = java.nio.file.Files.createTempDirectory("ctx-snap-bin").toFile()
+        val fp = "auth-fp"
+        try {
+            val store = TaskContextStore(snapshotDir = dir)
+            val id = store.create("with-bin")
+            val keep = store.saveResult(id, "keep-me", fp)
+            val bin = store.saveBinary(id, byteArrayOf(1, 2, 3), fp, "font-a")
+            store.saveResult(id, "trigger-snap", fp) // saveBinary 不写快照；由其它 mutator 触发
+
+            // 等防抖落盘（scheduleSave 内部 delay(2000)）：快照文件里出现 trigger-snap 即最终写完成
+            val deadline = System.currentTimeMillis() + 15_000
+            var snap: com.mina.legadostudio.mcp.TaskContextSnapshot.TaskSnapshot? = null
+            while (System.currentTimeMillis() < deadline) {
+                snap = com.mina.legadostudio.mcp.TaskContextSnapshot.load(dir)
+                    .firstOrNull { it.id == id }
+                if (snap != null && snap.entries.any { it.text == "trigger-snap" }) break
+                kotlinx.coroutines.delay(150)
+            }
+            assertNotNull("快照未在限时内落盘", snap)
+            val kinds = snap!!.entries.map { it.kind }
+            assertTrue(kinds.contains("result"))
+            assertFalse("binary 槽不得写入快照", kinds.contains(TaskContextStore.KIND_BINARY))
+
+            // 模拟进程重启：同一 snapshotDir 重建 store
+            val store2 = TaskContextStore(snapshotDir = dir)
+            val entries2 = store2.describe(id)["entries"] as List<*>
+            val kinds2 = entries2.map { (it as Map<*, *>)["kind"] }
+            assertTrue(kinds2.contains("result"))
+            assertFalse(kinds2.contains(TaskContextStore.KIND_BINARY))
+            // 旧 binary 引用不留 ghost：条目不存在，get/binary 均失败
+            assertTrue(runCatching { store2.get(id, bin.id, fp) }.isFailure)
+            assertTrue(runCatching { store2.binary(id, bin.id, fp) }.isFailure)
+            // 普通条目完好保留（恢复条目标 stale，但正文与元数据还在）
+            assertEquals("keep-me", store2.get(id, keep.id, fp).text)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+    @Test fun legacyBinarySnapshotEntriesAreSkippedOnRestore() = runBlocking {
+        // 旧版本已把 binary 条目写进快照的场景：恢复时跳过，不产出 ghost 引用
+        val now = 10_000_000L
+        val dir = java.nio.file.Files.createTempDirectory("ctx-snap-legacy").toFile()
+        try {
+            val snap = com.mina.legadostudio.mcp.TaskContextSnapshot.TaskSnapshot(
+                id = "legacy-ctx", label = "旧任务", touched = now, notes = "n",
+                entries = listOf(
+                    com.mina.legadostudio.mcp.TaskContextSnapshot.EntrySnapshot(
+                        "pg1", "page", "page-body", now, "fp", code = 200, finalUrl = "https://example.org/"),
+                    com.mina.legadostudio.mcp.TaskContextSnapshot.EntrySnapshot(
+                        "bin1", TaskContextStore.KIND_BINARY, "font-label", now, "fp"),
+                ),
+            )
+            com.mina.legadostudio.mcp.TaskContextSnapshot.save(dir, listOf(snap))
+            val store = TaskContextStore(clock = { now }, snapshotDir = dir)
+            val entries = store.describe("legacy-ctx")["entries"] as List<*>
+            val kinds = entries.map { (it as Map<*, *>)["kind"] }
+            assertEquals(listOf("page"), kinds) // binary 快照条目被跳过，普通页保留
+            assertTrue(runCatching { store.binary("legacy-ctx", "bin1", "fp") }.isFailure)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
     @Test fun corruptSnapshotFileNeverBreaksStore() = runBlocking {
         val dir = java.nio.file.Files.createTempDirectory("ctx-snap-bad").toFile()
         try {

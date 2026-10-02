@@ -16,8 +16,27 @@ class BookSourceValidatorTest {
         val filler = "x".repeat(400)
         val broken = """{"bookSourceName":"n","bookSourceUrl":"https://a.com","ruleContent":{"content":"<js>$filler"""
         val issue = validator.validate(broken).issues.first { it.path == "$" }
-        assertTrue(issue.message.contains("错误位置附近源码"))
+        assertTrue("expected position marker in: ${issue.message}",
+            issue.message.contains("错误位置附近源码") || issue.message.contains("错误位置（"))
         assertTrue(issue.message.contains(filler.takeLast(80)))
+    }
+
+    @Test fun malformedMultiLineJsonReportsLineAndColumnWithSnippet() {
+        // 阶段二回归：多行 JSON 的语法错必须按 line+column 定位，不能把列号当全串偏移指到第一行
+        val json = """
+            {
+              "bookSourceName": "示例",
+              "bookSourceUrl": "https://example.com",
+              "ruleToc": {"chapterList": "a"},
+              "ruleContent": {"content": "#content"}
+              BROKEN_LINE_HERE
+            }
+        """.trimIndent()
+        val issue = validator.validate(json).issues.first { it.path == "$" }
+        // Gson 报出 line 6 附近：提示里必须带行号，且截取的片段落在 BROKEN_LINE_HERE 附近而不是第一行
+        assertTrue("expected line number in: ${issue.message}", Regex("第 \\d+ 行").containsMatchIn(issue.message))
+        assertTrue("snippet should contain the broken token: ${issue.message}", issue.message.contains("BROKEN_LINE_HERE"))
+        assertFalse(issue.message.contains("示例"))
     }
 
     @Test fun rejectsMissingRequiredFields() {

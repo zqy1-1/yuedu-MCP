@@ -60,4 +60,39 @@ class RhinoEvaluatorTest {
         )
         assertEquals("hi", decrypted.value)
     }
+
+    @Test fun exposesJsoupGlobalAndResponseHelpers() {
+        val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+        val js = """
+            var doc = Jsoup.parse("<div class='item'>内容文本</div>");
+            var txt = doc.select(".item").text();
+            txt
+        """.trimIndent()
+        val result = evaluator.evaluate(js)
+        assertEquals("内容文本", result.value)
+    }
+
+    @Test fun responseExposesHeaderBytesAndPriorResponse() {
+        val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+        val headers = mapOf("Set-Cookie" to "session=123", "Content-Type" to "text/html")
+        val fakeResp = com.mina.legadostudio.runtime.StudioJsResponse(200, "http://a.com", "hello", headers, 10, "hello".toByteArray(), null)
+        val js = """
+            resp.header("set-cookie") + ":" + java.bytesToStr(resp.bytes(), "UTF-8") + ":" + (resp.raw().priorResponse() == null)
+        """.trimIndent()
+        val result = evaluator.evaluate(js, bindings = mapOf("resp" to fakeResp))
+        assertEquals("session=123:hello:true", result.value)
+    }
+
+    @Test fun supportsSetContentAndGetStringListAndMemoryPutGet() {
+        val evaluator = RhinoEvaluator(HttpFetcher(), Gson())
+        val js = """
+            java.put('search_key', '天命');
+            var k = java.get('search_key');
+            java.setContent("<div class='list'><p class='title'>修罗武神</p><p class='title'>天命之子</p></div>");
+            var list = java.getStringList(".title@text");
+            k + ":" + list.length + ":" + list[0] + ":" + list[1]
+        """.trimIndent()
+        val result = evaluator.evaluate(js)
+        assertEquals("天命:2:修罗武神:天命之子", result.value)
+    }
 }

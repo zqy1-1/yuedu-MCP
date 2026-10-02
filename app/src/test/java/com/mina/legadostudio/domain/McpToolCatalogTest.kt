@@ -74,6 +74,12 @@ class McpToolCatalogTest {
             "get_cookies",
             "set_cookie",
             "clear_cookies",
+            "capture_once",
+            "webview_capture",
+            "list_captures",
+            "get_capture",
+            "poll_capture",
+            "get_capture_resource",
         )
         val missing = required - toolNames()
         assertTrue("missing required tools: $missing", missing.isEmpty())

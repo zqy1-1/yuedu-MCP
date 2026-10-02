@@ -19,11 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.BatterySaver
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.RestartAlt
@@ -66,6 +68,7 @@ import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.LocalStudioHaze
 import com.mina.legadostudio.ui.theme.StudioSegmentedControl
+import com.mina.legadostudio.ui.theme.StudioSpacing
 import com.mina.legadostudio.ui.theme.ThemeMode
 import com.mina.legadostudio.ui.theme.TonalIconBox
 import com.mina.legadostudio.ui.theme.studioBottomInset
@@ -82,7 +85,7 @@ import kotlinx.coroutines.withContext
 private enum class McpTab(val label: String) { CONNECT("连接"), SETTINGS("设置"), READINESS("前置条件") }
 
 @Composable
-fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = ThemeMode.SYSTEM, onThemeModeChange: (ThemeMode) -> Unit = {}) {
+fun McpStatusScreen(onOpenVerification: () -> Unit = {}, onOpenGuide: () -> Unit = {}, themeMode: ThemeMode = ThemeMode.SYSTEM, onThemeModeChange: (ThemeMode) -> Unit = {}) {
     val context = LocalContext.current
     val app = context.applicationContext as StudioApplication
     val haze = LocalStudioHaze.current
@@ -139,8 +142,8 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset())) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = StudioSpacing.screen, vertical = StudioSpacing.medium),
+                horizontalArrangement = Arrangement.spacedBy(StudioSpacing.medium),
             ) {
                 McpTab.entries.forEach { value ->
                     val on = tab == value
@@ -159,7 +162,7 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
 
             LazyColumn(
                 Modifier.fillMaxSize().then(if (haze != null) Modifier.hazeSource(haze) else Modifier),
-                contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 4.dp, bottom = 108.dp + studioBottomInset()),
+                contentPadding = PaddingValues(start = StudioSpacing.screen, end = StudioSpacing.screen, top = 4.dp, bottom = StudioSpacing.screenBottomBase + studioBottomInset()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 when (tab) {
@@ -315,6 +318,19 @@ fun McpStatusScreen(onOpenVerification: () -> Unit = {}, themeMode: ThemeMode = 
                         item { ReadinessCard("MCP HTTP 健康检查", !running || healthOk, if (!running) "服务未启动" else if (healthOk) "127.0.0.1:${status["port"]}/health 正常" else "进程已启动，健康检查失败", Icons.Outlined.CheckCircle) { if (running) McpService.restart(context) } }
                     }
                     McpTab.SETTINGS -> {
+                        item {
+                            val cs = MaterialTheme.colorScheme
+                            GlassCard(onClick = onOpenGuide) {
+                                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    TonalIconBox(Icons.Outlined.MenuBook, cs.secondaryContainer, cs.onSecondaryContainer)
+                                    Column(Modifier.weight(1f)) {
+                                        Text("功能介绍", style = MaterialTheme.typography.titleMedium)
+                                        Text("版本、功能说明与 AI/人工抓包流程", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                                    }
+                                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, contentDescription = null, tint = cs.onSurfaceVariant)
+                                }
+                            }
+                        }
                         item {
                             GlassCard { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Text("连接参数", style = MaterialTheme.typography.titleMedium)

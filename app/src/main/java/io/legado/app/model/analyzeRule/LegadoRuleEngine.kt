@@ -68,11 +68,28 @@ class LegadoRuleEngine {
     }
 
     companion object {
-        fun detect(rule: String): Kind = when {
-            rule.startsWith("@XPath:", true) || rule.trimStart().startsWith("//") -> Kind.XPATH
-            rule.startsWith("@Json:", true) || rule.trimStart().startsWith("$.") -> Kind.JSON_PATH
-            rule.startsWith(":") -> Kind.REGEX
-            else -> Kind.CSS
+        /**
+         * 对齐官方 AnalyzeRule.SourceRule.init 的整串模式判定：模式只看规则串开头一次，
+         * &&/||/%% 分支内再出现的前缀不会进到这里（交由各引擎按字面量处理，
+         * JSoup 下分支内 @css: 会报 Could not parse query，与真机一致）。
+         * 显式 kind（inspect_rule 传入）优先于本判定。
+         */
+        fun detect(rule: String): Kind {
+            val trimmed = rule.trimStart()
+            return when {
+                // @css: 前缀不在这里剥：AnalyzeByJSoup 内部 SourceRule 负责剥除并置 isCss，
+                // 走 selectCss 语义（CSS 用 jsoup select、不支持 legado 索引语法），与真机一致
+                trimmed.startsWith("@CSS:", true) -> Kind.CSS
+                trimmed.startsWith("@XPath:", true) -> Kind.XPATH
+                trimmed.startsWith("@Json:", true) -> Kind.JSON_PATH
+                trimmed.startsWith(":") -> Kind.REGEX
+                // @@ = 剥前缀走默认（JSoup），normalize 负责剥除
+                trimmed.startsWith("@@") -> Kind.CSS
+                // 官方 SourceRule：/ 开头（含 //）均判 XPath
+                trimmed.startsWith("/") -> Kind.XPATH
+                trimmed.startsWith("$.") || trimmed.startsWith("$[") -> Kind.JSON_PATH
+                else -> Kind.CSS
+            }
         }
 
         private fun normalize(rule: String, kind: Kind): String = when (kind) {

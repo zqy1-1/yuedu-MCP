@@ -4,12 +4,41 @@ import androidx.annotation.Keep
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.mina.legadostudio.verification.RuntimeCookieStore
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 
 /**
  * 官方阅读 JS 环境同名对象：cookie / cache / source。
  * 注入 eval_js 与书源 <js>/{{}} 求值上下文，方法名与官方保持一致，AI 按官方 js-api 文档写的 JS 不需要改写。
  * 说明：cache 为进程内实现（官方是磁盘持久层）；调试工具进程内有效即可，重启后请重新写入。
  */
+
+/**
+ * 登录信息桩存储：真机 source.getLoginInfo/putLoginInfo 与登录 UI/书源 loginUi 配置联动，
+ * 沙箱没有登录界面，退化为「按书源锚点进程内共享的 Map」。写入可见（putLoginInfo 后
+ * getLoginInfo 能读回），同一书源跨次 eval/debug 共享，模拟真机里登录信息已保存的状态；
+ * 首次读取返回 null 并由沙箱在日志行提示「桩实现，真机行为可能不同」。
+ * 锚点用书源 bookSourceUrl，取不到时共用 "" 键。
+ */
+object RuntimeLoginStore {
+    private val data = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
+    /** 每个锚点已提示过的桩 API 名，避免每次调用都重复打同一行 warning */
+    private val noted = CopyOnWriteArraySet<String>()
+
+    fun anchorOf(source: Any?): String = when (source) {
+        is SourceJsApi -> source.anchor
+        else -> ""
+    }
+
+    fun map(anchor: String): ConcurrentHashMap<String, String> =
+        data.getOrPut(anchor) { ConcurrentHashMap() }
+
+    fun noteOnce(anchor: String, api: String, warn: (String) -> Unit) {
+        if (noted.add("$anchor|$api")) {
+            warn("$api 为沙箱桩实现：沙箱无登录界面，返回进程内模拟值（默认空）；真机行为可能不同（真机值来自书源 loginUi 表单/用户输入）")
+        }
+    }
+}
 
 @Keep
 class CookieJsApi(private val cookies: RuntimeCookieStore?) {
@@ -102,7 +131,12 @@ class CacheJsApi(private val store: RuntimeCacheStore = RuntimeCacheStore) {
 
 /** 官方 source 对象：调试期书源变量仓库。底层 state 与 debug 流程共享，JS 写入对后续规则可见。 */
 @Keep
-class SourceJsApi(private val state: MutableMap<String, String> = mutableMapOf()) {
+class SourceJsApi(
+    private val state: MutableMap<String, String> = mutableMapOf(),
+    /** 登录信息锚点（书源 bookSourceUrl）；桩存储按键隔离，见 [RuntimeLoginStore] */
+    internal val anchor: String = "",
+    private val warn: (String) -> Unit = {},
+) {
     private val gson = Gson()
 
     /** 官方 source.getVariable()：全部变量的 JSON 串 */
@@ -125,4 +159,44 @@ class SourceJsApi(private val state: MutableMap<String, String> = mutableMapOf()
 
     /** 官方 source.get(key) */
     fun get(key: String): String? = state[key]
+
+    /** 官方 source.getLoginInfo()：登录信息 JSON 串；沙箱桩，未写入过返回 null 并提示一次 */
+    fun getLoginInfo(): String? {
+        RuntimeLoginStore.noteOnce(anchor, "source.getLoginInfo", warn)
+        return RuntimeLoginStore.map(anchor).takeIf { it.isNotEmpty() }?.let { gson.toJson(it) }
+    }
+
+    /** 官方 source.getLoginInfoMap()：登录信息 Map；沙箱桩 */
+    fun getLoginInfoMap(): Map<String, String>? {
+        RuntimeLoginStore.noteOnce(anchor, "source.getLoginInfoMap", warn)
+        return RuntimeLoginStore.map(anchor).takeIf { it.isNotEmpty() }?.toMap()
+    }
+
+    /** 官方 source.getLoginInfo(key)：单个登录信息值；沙箱桩 */
+    fun getLoginInfo(key: String): String? {
+        RuntimeLoginStore.noteOnce(anchor, "source.getLoginInfo", warn)
+        return RuntimeLoginStore.map(anchor)[key]
+    }
+
+    /** 官方 source.putLoginInfo(json)：登录函数存放登录信息（JSON 串写入，键值均转字符串） */
+    fun putLoginInfo(info: String?) {
+        RuntimeLoginStore.noteOnce(anchor, "source.putLoginInfo", warn)
+        if (info.isNullOrBlank()) return
+        runCatching {
+            JsonParser.parseString(info).asJsonObject.entrySet()
+                .forEach { RuntimeLoginStore.map(anchor)[it.key] = it.value.asString }
+        }
+    }
+
+    /** 官方 source.putLoginInfo(map)：Map 形态重载 */
+    fun putLoginInfo(info: Map<*, *>?) {
+        RuntimeLoginStore.noteOnce(anchor, "source.putLoginInfo", warn)
+        info?.forEach { (k, v) -> if (k != null) RuntimeLoginStore.map(anchor)[k.toString()] = v?.toString().orEmpty() }
+    }
+
+    /** 官方 source.putLoginInfo(key, value)：单键写入重载 */
+    fun putLoginInfo(key: String, value: Any?) {
+        RuntimeLoginStore.noteOnce(anchor, "source.putLoginInfo", warn)
+        RuntimeLoginStore.map(anchor)[key] = value?.toString().orEmpty()
+    }
 }

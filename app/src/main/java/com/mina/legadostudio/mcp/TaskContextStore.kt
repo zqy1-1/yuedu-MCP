@@ -38,18 +38,40 @@ class TaskContextStore(
         require(label.length <= 120) { "label 最多 120 字符" }
         expire()
         if (tasks.size >= maxContexts) evictOldest()
+        if (tasks.size >= maxContexts) evictLruIfNeeded()
         require(tasks.size < maxContexts) { "上下文数量已达上限，请先 clear_context" }
         val id = UUID.randomUUID().toString()
         tasks[id] = Task(id, label, clock())
         scheduleSnapshot()
         id
     }
-    private fun expire() { tasks.entries.removeAll { clock() - it.value.touched >= idleMs } }
+    private fun expire() {
+        val expired = tasks.entries.filter { clock() - it.value.touched >= idleMs }
+        expired.forEach { (_, t) -> t.entries.keys.forEach(binaryDecodedCache::remove) }
+        tasks.entries.removeAll { clock() - it.value.touched >= idleMs }
+    }
 
     /** 达到上限时优先回收最久未使用且已闲置的上下文，避免默认上下文把普通工具挤到报错。 */
     private fun evictOldest() {
         val deadline = clock() - minEvictIdleMs
         val victim = tasks.values.filter { it.touched <= deadline }.minByOrNull { it.touched } ?: return
+        victim.entries.keys.forEach(binaryDecodedCache::remove)
+        tasks.remove(victim.id)
+    }
+
+    /**
+     * 硬上限兜底：evictOldest 没找到超 minEvictIdleMs 的上下文（全部最近还在用）时，
+     * 驱逐全局 LRU 一个——丢一个旧任务引用好过硬性报「上限已满」中断批量调用。
+     * 优先偷未命名的（label 为空或 "MCP connection"）；全部有名字时也退到全局 LRU。
+     */
+    private fun evictLruIfNeeded() {
+        if (tasks.size < maxContexts) return
+        val victim = tasks.values
+            .filter { it.label.isBlank() || it.label == "MCP connection" }
+            .minByOrNull { it.touched }
+            ?: tasks.values.minByOrNull { it.touched }
+            ?: return
+        victim.entries.keys.forEach(binaryDecodedCache::remove)
         tasks.remove(victim.id)
     }
     private fun task(id: String): Task {
@@ -59,7 +81,8 @@ class TaskContextStore(
     private fun insert(task: Task, entry: Entry): Entry {
         require(entry.text.length <= maxEntryChars) { "CONTENT_TOO_LARGE：单项超出 $maxEntryChars 字符；未截断保存" }
         while (task.entries.isNotEmpty() && (task.entries.size >= 32 || task.entries.values.sumOf { it.text.length } + entry.text.length > maxChars)) {
-            task.entries.remove(task.entries.keys.first())
+            val evicted = task.entries.remove(task.entries.keys.first())
+            evicted?.let { binaryDecodedCache.remove(it.id) }
         }
         task.entries[entry.id] = entry
         return entry
@@ -88,6 +111,73 @@ class TaskContextStore(
         scheduleSnapshot()
         e
     }
+
+    /**
+     * 内存 binary 槽：存字体等不可文本化的原始字节。suspend + 与其他 mutator 同一把 Mutex，
+     * 保证 tasks/entries 的 LinkedHashMap 并发安全；函数体内不嵌套调用其它 suspend+withLock
+     * 方法（同 mutex 非重入，runBlocking 下单层锁安全、嵌套会挂起）。
+     * - kind="binary"，text 置空（不落 entries 字符配额、不进 scheduleSnapshot——快照只恢复 text/page 字段，
+     *   天然不会把二进制持久化）；
+     * - 每个上下文最多 8 个、总计 ≤16MB，先进先出；read()/metadata() 对 binary 条目不返回正文。
+     */
+    suspend fun saveBinary(id: String, bytes: ByteArray, fingerprint: String, label: String = ""): Entry = mutex.withLock {
+        val task = task(id)
+        require(label.length <= 200) { "label 最多 200 字符" }
+        require(bytes.size <= MAX_BINARY_BYTES) { "BINARY_TOO_LARGE：单项超过 ${MAX_BINARY_BYTES / 1024 / 1024}MB" }
+        // 先按上限驱逐最旧的 binary 槽，再硬性校验（驱逐失败才报错）
+        fun binaryBytes() = task.entries.values.filter { it.kind == KIND_BINARY }.sumOf { it.page?.rawBytes?.size ?: 0 }
+        while (task.entries.values.count { it.kind == KIND_BINARY } >= MAX_BINARIES_PER_CONTEXT ||
+            binaryBytes() + bytes.size > MAX_BINARY_TOTAL_BYTES) {
+            val oldest = task.entries.entries.firstOrNull { it.value.kind == KIND_BINARY } ?: break
+            task.entries.remove(oldest.key)
+            binaryDecodedCache.remove(oldest.key) // 驱逐条目时同步失效其解码缓存
+        }
+        require(task.entries.values.count { it.kind == KIND_BINARY } < MAX_BINARIES_PER_CONTEXT) {
+            "BINARY_SLOT_FULL：本上下文字体槽已满（$MAX_BINARIES_PER_CONTEXT 个），请先 clear_context"
+        }
+        require(binaryBytes() + bytes.size <= MAX_BINARY_TOTAL_BYTES) {
+            "BINARY_TOO_LARGE：本上下文二进制总量超过 ${MAX_BINARY_TOTAL_BYTES / 1024 / 1024}MB"
+        }
+        val shell = HttpFetcher.FetchResult(200, label, emptyMap(), "", 0, rawBytes = bytes)
+        val entry = Entry(UUID.randomUUID().toString(), KIND_BINARY, label, clock(), fingerprint, page = shell)
+        task.entries[entry.id] = entry
+        // 故意不 scheduleSnapshot：二进制不进快照文件
+        entry
+    }
+
+    /** 读 binary 槽字节；内联 get() 校验，避免对同一把 Mutex 嵌套 withLock。 */
+    suspend fun binary(id: String, entryId: String, fingerprint: String): ByteArray = mutex.withLock {
+        binaryEntry(id, entryId, fingerprint).page?.rawBytes
+            ?: error("BINARY_DATA_MISSING：二进制条目字节已不在内存")
+    }
+
+    /**
+     * 解 binary 槽字体的 cmap 并返回 (Decoded, 已排序映射行)。
+     * 按 entryId 缓存：get_font_map 分页多次调用时不必每页重跑 Brotli 解压+全量排序。
+     * 缓存随 entry 驱逐而失效（条目移除后再读会重解或报 REFERENCE_EXPIRED）。
+     */
+    suspend fun binaryDecoded(id: String, entryId: String, fingerprint: String): Pair<com.mina.legadostudio.network.Woff2Decoder.Decoded, List<String>> = mutex.withLock {
+        val entry = binaryEntry(id, entryId, fingerprint)
+        binaryDecodedCache[entryId]?.let { return@withLock it }
+        val bytes = entry.page?.rawBytes ?: error("BINARY_DATA_MISSING：二进制条目字节已不在内存")
+        val decoded = com.mina.legadostudio.network.Woff2Decoder.decode(bytes)
+        val pair = decoded to decoded.mappingLines()
+        binaryDecodedCache[entryId] = pair
+        pair
+    }
+
+    /** 持锁内的 binary 条目定位 + 指纹/kind 校验（binary/binaryMappingLines 共用）。 */
+    private fun binaryEntry(id: String, entryId: String, fingerprint: String): Entry {
+        val entry = task(id).entries[entryId] ?: run {
+            val owner = tasks.entries.firstOrNull { it.value.entries.containsKey(entryId) }?.key
+            error(if (owner != null) "REFERENCE_BELONGS_TO_OTHER_CONTEXT：引用 $entryId 属于上下文 $owner，请显式传入 contextId=$owner（并行任务之间不自动跨读，避免串数据）"
+                else "REFERENCE_EXPIRED_OR_UNKNOWN：引用已清理或不属于此上下文")
+        }
+        require(entry.fingerprint == fingerprint) { "AUTH_CONTEXT_CHANGED：登录或运行配置已变化，请重新抓取" }
+        require(entry.kind == KIND_BINARY) { "引用不是二进制条目" }
+        return entry
+    }
+    private val binaryDecodedCache = java.util.concurrent.ConcurrentHashMap<String, Pair<com.mina.legadostudio.network.Woff2Decoder.Decoded, List<String>>>()
     suspend fun get(id: String, entryId: String, fingerprint: String): Entry = mutex.withLock {
         val entry = task(id).entries[entryId] ?: run {
             val owner = tasks.entries.firstOrNull { it.value.entries.containsKey(entryId) }?.key
@@ -125,9 +215,10 @@ class TaskContextStore(
         }
     }
     suspend fun clear(id: String): Boolean = mutex.withLock {
-        val removed = tasks.remove(id) != null
-        if (removed) scheduleSnapshot()
-        removed
+        val removed = tasks.remove(id)
+        removed?.entries?.keys?.forEach(binaryDecodedCache::remove)
+        if (removed != null) scheduleSnapshot()
+        removed != null
     }
 
     /** 在持有 mutex 的调用点捕获当前任务快照，交给防抖写入。 */
@@ -136,7 +227,9 @@ class TaskContextStore(
         val snapshot = tasks.values.map { t ->
             TaskContextSnapshot.TaskSnapshot(
                 id = t.id, label = t.label, touched = t.touched, notes = t.notes,
-                entries = t.entries.values.map { e ->
+                // 二进制槽（kind=binary）不进快照：字节本就不持久化，留 kind/id/label 只会产出
+                // 没有 bytes 的 ghost 引用，违反「二进制槽进程重启即失效」约定。
+                entries = t.entries.values.filter { it.kind != KIND_BINARY }.map { e ->
                     TaskContextSnapshot.EntrySnapshot(
                         id = e.id, kind = e.kind, text = e.text, created = e.created,
                         fingerprint = e.fingerprint, key = null,
@@ -158,6 +251,8 @@ class TaskContextStore(
             runCatching {
                 val task = Task(s.id, s.label, s.touched, s.notes)
                 s.entries.orEmpty().forEach { e ->
+                    // 旧版本可能已把 binary 条目写进快照：恢复时跳过，避免无字节的 ghost 引用
+                    if (e.kind == KIND_BINARY) return@forEach
                     val page = if (e.kind == "page") HttpFetcher.FetchResult(
                         e.code ?: 200, e.finalUrl.orEmpty(), emptyMap(), e.text, e.elapsedMs ?: 0L,
                     ) else null
@@ -168,10 +263,21 @@ class TaskContextStore(
             }
         }
     }
-    fun metadata(e: Entry): Map<String, Any> = mapOf("id" to e.id, "kind" to e.kind,
-        "totalChars" to e.text.length, "sha256" to digest(e.text), "ageMs" to (clock() - e.created).coerceAtLeast(0),
-        "stale" to (clock() - e.created >= freshMs), "url" to (e.page?.finalUrl ?: ""))
+    fun metadata(e: Entry): Map<String, Any> {
+        val base = mutableMapOf<String, Any>("id" to e.id, "kind" to e.kind,
+            "totalChars" to e.text.length, "sha256" to digest(e.text), "ageMs" to (clock() - e.created).coerceAtLeast(0),
+            "stale" to (clock() - e.created >= freshMs), "url" to (e.page?.finalUrl ?: ""))
+        if (e.kind == KIND_BINARY) {
+            e.page?.rawBytes?.let {
+                base["binaryBytes"] = it.size
+                base["binarySha256"] = digest(it)
+            }
+        }
+        return base
+    }
     fun read(e: Entry, offset: Int = 0, limit: Int = 6000, query: String? = null): Map<String, Any> {
+        // 二进制条目没有可分页正文：read_page/read_result 只能拿到元信息
+        require(e.kind != KIND_BINARY) { "引用是二进制条目：正文不支持 read，请用 get_font_map/fontId 专用接口取元信息" }
         require(offset in 0..e.text.length) { "offset 超出正文范围" }
         require(limit in 1..12000) { "limit 必须是 1..12000" }
         val start = if (query == null) offset else {
@@ -184,6 +290,11 @@ class TaskContextStore(
             "nextOffset" to end, "hasMore" to (end < e.text.length), "snapshot" to true)
     }
     companion object {
+        const val KIND_BINARY = "binary"
+        const val MAX_BINARY_BYTES = 4 * 1024 * 1024
+        const val MAX_BINARIES_PER_CONTEXT = 8
+        const val MAX_BINARY_TOTAL_BYTES = 16 * 1024 * 1024
         fun digest(text: String): String = MessageDigest.getInstance("SHA-256").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
+        fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     }
 }

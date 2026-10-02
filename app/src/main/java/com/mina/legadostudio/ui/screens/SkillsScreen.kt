@@ -41,6 +41,7 @@ import com.mina.legadostudio.skills.SkillRepository
 import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.LocalStudioHaze
+import com.mina.legadostudio.ui.theme.StudioSpacing
 import com.mina.legadostudio.ui.theme.studioBottomInset
 import com.mina.legadostudio.ui.theme.studioFieldColors
 import com.mina.legadostudio.ui.theme.studioTopInset
@@ -132,7 +133,7 @@ fun SkillsScreen() {
         val skill = opened!!
         BackHandler { opened = null }
         Box(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset()).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.fillMaxSize().padding(top = 64.dp + studioTopInset()).padding(horizontal = StudioSpacing.screen), verticalArrangement = Arrangement.spacedBy(StudioSpacing.medium)) {
                 Text(if (skill.builtIn) "内置技能，只读" else "自定义技能", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (skill.builtIn) {
                     Text(
@@ -180,7 +181,7 @@ fun SkillsScreen() {
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             Modifier.fillMaxSize().then(if (haze != null) Modifier.hazeSource(haze) else Modifier),
-            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 72.dp + studioTopInset(), bottom = 108.dp + studioBottomInset()),
+            contentPadding = PaddingValues(start = StudioSpacing.screen, end = StudioSpacing.screen, top = StudioSpacing.screenTopBase + studioTopInset(), bottom = StudioSpacing.screenBottomBase + studioBottomInset()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item {

@@ -8,6 +8,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,14 +24,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,6 +62,7 @@ import com.mina.legadostudio.ui.theme.GlassCard
 import com.mina.legadostudio.ui.theme.GlassTopBar
 import com.mina.legadostudio.ui.theme.LocalStudioFullscreen
 import com.mina.legadostudio.ui.theme.LocalStudioHaze
+import com.mina.legadostudio.ui.theme.StudioSpacing
 import com.mina.legadostudio.ui.theme.studioBottomInset
 import com.mina.legadostudio.ui.theme.studioTopInset
 import dev.chrisbanes.haze.hazeSource
@@ -86,6 +88,8 @@ fun SourcesScreen() {
     var notice by remember { mutableStateOf("") }
     var chooser by remember { mutableStateOf<Pair<String, List<ReaderCatalog.App>>?>(null) }
     var pendingDelete by remember { mutableStateOf<ProjectEntity?>(null) }
+    var pendingDeleteGroup by remember { mutableStateOf<SourceGroup?>(null) }
+    var pendingClearAll by remember { mutableStateOf(false) }
     var viewingProject by remember { mutableStateOf<ProjectEntity?>(null) }
     var expanded by remember { mutableStateOf(setOf<String>()) }
 
@@ -103,22 +107,34 @@ fun SourcesScreen() {
     fun shareSource(project: ProjectEntity) {
         scope.launch {
             runCatching {
-                withContext(Dispatchers.IO) {
+                // IO 内只做文件写盘与 intent 组装；startActivity 回主线程——
+                // 部分 ROM（Android 8+）从后台线程调起分享面板会唤不出/丢授权
+                val intent = withContext(Dispatchers.IO) {
                     val payload = SourceImportPayload.arrayJson(project.sourceJson)
                     val dir = File(context.cacheDir, "exports").apply { mkdirs() }
                     val file = File(dir, "${exportFileName(project)}.json")
                     file.writeText(payload, Charsets.UTF_8)
                     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "application/json"
+                    Intent(Intent.ACTION_SEND).apply {
+                        // MIME 用 text/plain 而非 application/json：主流社交 App（微信/QQ）对
+                        // application/json 的 ACTION_SEND 支持差，分享面板可能直接无目标；
+                        // text/plain 能落到「发送给好友/保存」入口，文件名仍带 .json 后缀
+                        type = "text/plain"
                         putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, file.name)
                         putExtra(Intent.EXTRA_TITLE, project.name.ifBlank { project.id })
+                        // ClipData 携带 content:// URI：Android 8+ 上仅靠 EXTRA_STREAM+GRANT flag
+                        // 对 Direct Share/预览缩略图的目标进程不授权，ClipData 才覆盖全部目标
+                        clipData = ClipData.newUri(context.contentResolver, file.name, uri)
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    context.startActivity(Intent.createChooser(intent, "分享书源 JSON"))
                 }
+                val chooser = Intent.createChooser(intent, "分享书源 JSON").apply {
+                    if (context !is android.app.Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                withContext(Dispatchers.Main) { context.startActivity(chooser) }
             }.onSuccess { show("已生成「${project.name.ifBlank { project.id }}」JSON，选择应用分享") }
-                .onFailure { show("分享失败：${it.message.orEmpty()}") }
+                .onFailure { show("分享失败：${it.message ?: it.javaClass.simpleName}") }
         }
     }
 
@@ -136,7 +152,7 @@ fun SourcesScreen() {
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             Modifier.fillMaxSize().then(if (haze != null) Modifier.hazeSource(haze) else Modifier),
-            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 72.dp + studioTopInset(), bottom = 108.dp + studioBottomInset()),
+            contentPadding = PaddingValues(start = StudioSpacing.screen, end = StudioSpacing.screen, top = StudioSpacing.screenTopBase + studioTopInset(), bottom = StudioSpacing.screenBottomBase + studioBottomInset()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item {
@@ -145,7 +161,7 @@ fun SourcesScreen() {
                         Text("本地书源库", style = MaterialTheme.typography.titleMedium)
                         Text(
                             if (projects.isEmpty()) "暂无记录。外部 MCP 客户端 调用 save_source 后将按站点域名分组列出。"
-                            else "按站点域名分组，组内按保存时间倒序。同一 URL 默认只保留一条成品；下一轮修复时外部客户端才会追加新版本。",
+                            else "按站点域名分组，组内按保存时间倒序。同站点自动保留最新 5 个版本；支持一键删除整组与一键清空。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -167,10 +183,21 @@ fun SourcesScreen() {
                     onImport = { importSource(it.sourceJson) },
                     onShare = ::shareSource,
                     onDelete = { pendingDelete = it },
+                    onDeleteGroup = { pendingDeleteGroup = it },
                 )
             }
         }
-        GlassTopBar("书源", modifier = Modifier.align(Alignment.TopCenter))
+        GlassTopBar(
+            "书源",
+            actions = {
+                if (projects.isNotEmpty()) {
+                    TextButton(onClick = { pendingClearAll = true }) {
+                        Text("清空", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
     }
 
     chooser?.let { (json, apps) ->
@@ -205,6 +232,47 @@ fun SourcesScreen() {
         )
     }
 
+    pendingDeleteGroup?.let { group ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteGroup = null },
+            title = { Text("一键删除站点书源") },
+            text = { Text("将彻底删除域名「${group.domain}」下的全部 ${group.items.size} 个版本记录。此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val ids = group.items.map { it.id }
+                    val domain = group.domain
+                    pendingDeleteGroup = null
+                    scope.launch {
+                        runCatching { app.projects.delete(ids) }
+                            .onSuccess { show("已删除 $domain 下全部 ${ids.size} 条记录") }
+                            .onFailure { show(it.message.orEmpty()) }
+                    }
+                }) { Text("一键删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeleteGroup = null }) { Text("取消") } },
+        )
+    }
+
+    if (pendingClearAll) {
+        AlertDialog(
+            onDismissRequest = { pendingClearAll = false },
+            title = { Text("清空书源库") },
+            text = { Text("将清空本地工坊保存的全部 ${projects.size} 条书源记录。已导入阅读客户端的书源不受影响。此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingClearAll = false
+                    val allIds = projects.map { it.id }
+                    scope.launch {
+                        runCatching { app.projects.delete(allIds) }
+                            .onSuccess { show("已清空本地书源库") }
+                            .onFailure { show(it.message.orEmpty()) }
+                    }
+                }) { Text("全部清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingClearAll = false }) { Text("取消") } },
+        )
+    }
+
     // 书源详情视图（JSON 格式展示）
     viewingProject?.let { project ->
         SourceDetailView(
@@ -227,6 +295,7 @@ private fun DomainSourceGroup(
     onImport: (ProjectEntity) -> Unit,
     onShare: (ProjectEntity) -> Unit,
     onDelete: (ProjectEntity) -> Unit,
+    onDeleteGroup: (SourceGroup) -> Unit,
 ) {
     GlassCard {
         Column(Modifier.fillMaxWidth()) {
@@ -241,6 +310,16 @@ private fun DomainSourceGroup(
                         "${group.items.size} 条记录 · 最近 ${formatTime(group.latest.updatedAt)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(
+                    onClick = { onDeleteGroup(group) },
+                    modifier = Modifier.padding(end = 4.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Delete,
+                        contentDescription = "删除整组",
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
                     )
                 }
                 Icon(
@@ -290,57 +369,74 @@ private fun SourceVersionRow(
             .fillMaxWidth()
             .clickable { onDetail(project) }
             .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(project.name.ifBlank { "未命名书源" }, fontWeight = FontWeight.Medium)
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(project.name.ifBlank { "未命名书源" }, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall)
                 Text(project.siteUrl.ifBlank { project.id }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(formatTime(project.updatedAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(formatTime(project.updatedAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f))
             }
-            IconButton(onClick = { onDelete(project) }) {
+            IconButton(
+                onClick = { onDelete(project) },
+                modifier = Modifier.padding(start = 4.dp),
+            ) {
                 Icon(
                     Icons.Outlined.Delete,
-                    contentDescription = "删除",
-                    tint = MaterialTheme.colorScheme.error,
+                    contentDescription = "删除书源",
+                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
                 )
             }
         }
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = { onDetail(project) },
-                modifier = Modifier.weight(1f).height(36.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+
+        // 4 个核心功能按钮：2x2 对称网格，整齐大方
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("详情", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                TextButton(
+                    onClick = { onDetail(project) },
+                    modifier = Modifier.weight(1f).height(38.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) {
+                    Text("详情", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+                TextButton(
+                    onClick = {
+                        onCopy(project)
+                        copied = true
+                    },
+                    modifier = Modifier.weight(1f).height(38.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) {
+                    Text(if (copied) "已复制" else "复制源", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
             }
-            TextButton(
-                onClick = {
-                    onCopy(project)
-                    copied = true
-                },
-                modifier = Modifier.weight(1f).height(36.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (copied) "已复制" else "复制源", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            TextButton(
-                onClick = { onImport(project) },
-                modifier = Modifier.weight(1f).height(36.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-            ) {
-                Text("导入至阅读", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            TextButton(
-                onClick = { onShare(project) },
-                modifier = Modifier.weight(1f).height(36.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-            ) {
-                Text("分享JSON", style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                TextButton(
+                    onClick = { onImport(project) },
+                    modifier = Modifier.weight(1f).height(38.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) {
+                    Text("导入至阅读", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+                TextButton(
+                    onClick = { onShare(project) },
+                    modifier = Modifier.weight(1f).height(38.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                ) {
+                    Text("分享JSON", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
             }
         }
     }
@@ -360,6 +456,7 @@ private fun SourceDetailView(
     BackHandler(onBack = onBack)
     val prettyJson = remember(project.sourceJson) { formatJson(project.sourceJson) }
     var copied by remember { mutableStateOf(false) }
+    var wrapJson by remember { mutableStateOf(true) }
     LaunchedEffect(copied) {
         if (copied) {
             delay(2000)
@@ -372,9 +469,9 @@ private fun SourceDetailView(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .padding(top = 64.dp + studioTopInset(), bottom = 16.dp + studioBottomInset())
+                    .padding(top = 64.dp + studioTopInset(), bottom = StudioSpacing.card + studioBottomInset())
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = StudioSpacing.card),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
@@ -393,50 +490,88 @@ private fun SourceDetailView(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Button(
-                        onClick = {
-                            onCopy(project)
-                            copied = true
-                        },
-                        modifier = Modifier.weight(1f).height(44.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(StudioSpacing.medium)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(StudioSpacing.medium),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(if (copied) "已复制" else "复制源", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-                    }
-                    Button(
-                        onClick = { onImport(project) },
-                        modifier = Modifier.weight(1f).height(44.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) {
-                        Text("导入至阅读", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                        Button(
+                            onClick = {
+                                onCopy(project)
+                                copied = true
+                            },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) {
+                            Text(if (copied) "已复制" else "复制源", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                        }
+                        Button(
+                            onClick = { onImport(project) },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) {
+                            Text("导入至阅读", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                     Button(
                         onClick = { onShare(project) },
-                        modifier = Modifier.weight(1f).height(44.dp),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                     ) {
                         Text("分享JSON", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                     }
                 }
 
-                Text("书源规则 JSON：", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("书源规则 JSON：", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = { wrapJson = !wrapJson }) {
+                        Text(if (wrapJson) "自动换行: 开" else "自动换行: 关", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
                 GlassCard(modifier = Modifier.fillMaxWidth()) {
-                    Box(Modifier.padding(12.dp)) {
-                        Text(
-                            text = prettyJson,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                    if (wrapJson) {
+                        Box(Modifier.fillMaxWidth().padding(StudioSpacing.large)) {
+                            Text(
+                                text = prettyJson,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                softWrap = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(StudioSpacing.large),
+                        ) {
+                            Text(
+                                text = prettyJson,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                softWrap = false,
+                            )
+                        }
                     }
                 }
             }
         }
-        GlassTopBar("书源详情", onBack = onBack, modifier = Modifier.align(Alignment.TopCenter))
+        GlassTopBar(
+            "书源详情",
+            onBack = onBack,
+            actions = {
+                TextButton(onClick = { wrapJson = !wrapJson }) {
+                    Text(if (wrapJson) "换行" else "单行")
+                }
+            },
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
     }
 }
 

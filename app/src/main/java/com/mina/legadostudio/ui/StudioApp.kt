@@ -37,6 +37,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.mina.legadostudio.ui.screens.BrowserCaptureScreen
+import com.mina.legadostudio.ui.screens.CaptureHistoryScreen
+import com.mina.legadostudio.ui.screens.CaptureOnceScreen
+import com.mina.legadostudio.ui.screens.FeatureGuideScreen
 import com.mina.legadostudio.ui.screens.LogsScreen
 import com.mina.legadostudio.ui.screens.McpStatusScreen
 import com.mina.legadostudio.ui.screens.SkillsScreen
@@ -117,12 +121,30 @@ fun StudioApp(initialRoute: String? = null, deepLinkNonce: Int = 0, onExit: () -
                             launchSingleTop = true
                             restoreState = true
                         }
+                    }, onOpenGuide = {
+                        // 功能介绍是 MCP 页内的二级页面：普通压栈，返回即回到 MCP
+                        nav.navigate("guide")
                     }, themeMode = themeMode, onThemeModeChange = { themeMode = it; themeStore.save(it) }) }
                     composable("sources") { SourcesScreen() }
                     composable("skills") { SkillsScreen() }
-                    composable("logs") { LogsScreen() }
+                    composable("logs") {
+                        LogsScreen(
+                            onOpenGuide = { nav.navigate("guide") },
+                            onOpenBrowserCapture = { nav.navigate("browser_capture") },
+                            onOpenCaptureOnce = { nav.navigate("capture_once") },
+                            onOpenCaptureHistory = { nav.navigate("capture_history") },
+                        )
+                    }
                     // 验证中心是底栏顶级页面，不显示返回箭头（系统返回键仍可回上一页）
                     composable("verification") { VerificationCenterScreen() }
+                    // 功能介绍只从 MCP 页内进入，不在底栏、不接受外部深链
+                    composable("guide") { FeatureGuideScreen(onBack = { nav.popBackStack() }) }
+                    // 浏览器抓包是可见可交互的独立二级页（不在底栏、不接受深链）：
+                    // 从「日志→抓包」入口进入，返回即回日志页。
+                    composable("browser_capture") { BrowserCaptureScreen(onBack = { nav.popBackStack() }) }
+                    // 逐次抓包 / 抓包会话历史同样是「日志→抓包」下的内部二级页（普通压栈，返回回入口）
+                    composable("capture_once") { CaptureOnceScreen(onBack = { nav.popBackStack() }) }
+                    composable("capture_history") { CaptureHistoryScreen(onBack = { nav.popBackStack() }) }
                 }
                 if (route in tabs.map { it.route } && !fullscreenOverlay.value) {
                     GlassTabBar(

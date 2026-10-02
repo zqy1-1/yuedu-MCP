@@ -45,6 +45,7 @@
 - 不要在验证完成前重试原工具：结果一样被拦，浪费调用。
 - 不要试图用 `set_cookie` 手工拼 CF/验证码 Cookie：cf_clearance 与 TLS 指纹绑定，OkHttp 通道复用 WebView 拿到的 Cookie 通常无效——这正是系统自动切 WebView 抓取的原因。
 - 「一搜一验」站点不要指望缓存 Cookie，直接 `always`。
+- 过完挑战后 cookie 不会自动进书源：用 `apply_webview_cookies(url, projectId 或 bookSourceUrl)` 把 WebView 采到的 Cookie 与 UA 一键合并进书源 `header`（同名覆盖、未点名保留；返回值不含 cookie 明文）。浏览器抓包页手动过挑战的页面在「结束并保存」时会同步采 cookie，之后同样可调用本工具回填。
 
 ## 调试期验证 vs 成品源过盾
 
@@ -52,5 +53,7 @@
 |---|---|
 | MCP 调试期（本 playbook） | 验证中心 + 每域模式 + WebView 抓取通道 |
 | 成品源在官方阅读 App 内运行 | 书源内 `loginCheckJs` + `java.startBrowserAwait`（见 [`troubleshoot.md`](troubleshoot.md) 第 4 节） |
+
+**覆盖范围必须逐链路分清**：`loginCheckJs` 是**写进成品书源、由官方阅读 App 在请求后执行**的钩子；Studio 沙箱的 `debug_source` / `check_source` / `eval_js` **不执行 `loginCheckJs`**（`EmbeddedLegadoRuntime` 无此调用点），不要指望在沙箱里靠它过盾。反过来，验证中心/每域 WebView 模式只存在于工坊调试期，官方阅读 App 没有这套机制——成品在真机出盾时只能靠 `loginCheckJs`/`startBrowserAwait`/URL `webView` 选项自理。因此「调试期过盾」与「成品过盾」是两条链路，都要验证，不能互相代替。
 
 调试通过验证中心过完盾、规则写好后，如果目标站在真实使用中也会频繁出盾，应把 `loginCheckJs` 过盾逻辑写进书源，保证导入阅读 App 后仍能工作。验证码类站点的识别特征与处理见知识库：`search_knowledge("验证码")` → `read_knowledge("knowledge/图文验证码.md")`。
